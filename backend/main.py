@@ -183,7 +183,11 @@ async def security_headers_middleware(request: Request, call_next):
     response.headers["X-XSS-Protection"] = "1; mode=block"
     response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
     response.headers["Content-Security-Policy"] = (
-        "default-src 'self'; img-src 'self' https: data:; style-src 'self' 'unsafe-inline' https:; script-src 'self' 'unsafe-inline'"
+        "default-src 'self'; "
+        "img-src 'self' https: data: blob:; "
+        "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com https:; "
+        "font-src 'self' https://fonts.gstatic.com data:; "
+        "script-src 'self' 'unsafe-inline' https://cdn.tailwindcss.com"
     )
     return response
 
