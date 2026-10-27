@@ -38,6 +38,7 @@ class MpesaService:
         self.callback_base_url = os.environ.get(
             "DARAJA_CALLBACK_URL", "https://api.barmabiz.co.ke"
         ).rstrip("/")
+        self.webhook_secret = os.environ.get("DARAJA_WEBHOOK_SECRET", "").strip()
 
         # In-memory token cache
         self._cached_token: Optional[str] = None
@@ -99,6 +100,9 @@ class MpesaService:
 
         token = await self.get_access_token()
         if token:
+            cb_url = f"{self.callback_base_url}/api/mpesa/callback"
+            if self.webhook_secret:
+                cb_url = f"{cb_url}?token={self.webhook_secret}"
             payload = {
                 "BusinessShortCode": self.shortcode,
                 "Password": password,
@@ -108,7 +112,7 @@ class MpesaService:
                 "PartyA": clean_phone,
                 "PartyB": self.shortcode,
                 "PhoneNumber": clean_phone,
-                "CallBackURL": f"{self.callback_base_url}/api/mpesa/callback",
+                "CallBackURL": cb_url,
                 "AccountReference": reference,
                 "TransactionDesc": description[:32],
             }

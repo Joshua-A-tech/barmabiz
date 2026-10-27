@@ -194,7 +194,10 @@ export default function VendorOrdersTab({
                       Stage: {sub.fulfillment_status}
                     </div>
                     <div className="font-mono text-[10px] text-stone-400 mt-0.5">
-                      Buyer Release PIN: <strong>{sub.delivery_pin || "4821"}</strong>
+                      Buyer Release PIN:{" "}
+                      <strong>
+                        {sub.delivery_pin ? sub.delivery_pin : "•••• (Ask Buyer)"}
+                      </strong>
                     </div>
                     {sub.dispute_reason && (
                       <div className="text-[10px] text-red-600 mt-1 max-w-[180px] leading-tight">
@@ -235,7 +238,7 @@ export default function VendorOrdersTab({
                             handleUpdateOrderStatus(
                               sub.id,
                               "DELIVERED",
-                              sub.delivery_pin || "4821"
+                              sub.delivery_pin
                             )
                           }
                           className="bg-[#008060] hover:bg-[#006e52] text-white text-[11px] font-bold px-3 py-1.5 rounded-lg transition shadow-xs"

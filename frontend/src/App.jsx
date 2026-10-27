@@ -787,12 +787,10 @@ export default function App() {
     const targetStoreId = vendorDashboard.store.id;
     let deliveryPinToSend = null;
     if (status === "DELIVERED") {
-      const entered = window.prompt(
-        `Enter the Buyer's 4-Digit Delivery Release PIN to unlock Escrow funds (Demo PIN for this order: ${
-          expectedPin || "4821"
-        }):`,
-        expectedPin || "4821"
-      );
+      const promptMsg = expectedPin
+        ? `Enter the Buyer's 4-Digit Delivery Release PIN to unlock Escrow funds (Sandbox Demo PIN: ${expectedPin}):`
+        : "Enter the Buyer's 4-Digit Delivery Release PIN from their Order Receipt to unlock Escrow funds:";
+      const entered = window.prompt(promptMsg, expectedPin || "");
       if (entered === null) return;
       deliveryPinToSend = entered.trim();
     }

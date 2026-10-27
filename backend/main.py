@@ -153,19 +153,36 @@ app.add_middleware(
 # ==============================================================================
 # CRYPTOGRAPHIC SECURITY: PBKDF2 PASSWORDS, SIGNED TOKENS & RATE LIMITING
 # ==============================================================================
+IS_PRODUCTION = os.environ.get("BARMABIZ_ENV", "development").strip().lower() == "production"
 SERVER_SECRET_KEY = os.environ.get(
     "BARMABIZ_SECRET_KEY", "bmz_prod_hmac_secret_9f8e7d6c5b4a3f2e1d0c9b8a7f6e5d4c"
 )
+DARAJA_WEBHOOK_SECRET = os.environ.get("DARAJA_WEBHOOK_SECRET", "").strip()
 TOKEN_TTL_SECONDS = 86400  # 24 hours
 
-# Simple sliding-window rate limiter per IP + bucket
+# Bounded proxy-aware sliding-window rate limiter per IP + bucket
 _rate_buckets = defaultdict(list)
+MAX_RATE_BUCKET_KEYS = 5000
+
+
+def get_client_ip(request: Request) -> str:
+    if not request:
+        return "127.0.0.1"
+    cf_ip = request.headers.get("cf-connecting-ip")
+    if cf_ip:
+        return cf_ip.strip()
+    xff = request.headers.get("x-forwarded-for")
+    if xff:
+        return xff.split(",")[0].strip()
+    return request.client.host if request.client else "127.0.0.1"
 
 
 def check_rate_limit(request: Request, bucket: str, max_calls: int, window_sec: int):
-    client_ip = request.client.host if request and request.client else "127.0.0.1"
+    client_ip = get_client_ip(request)
     key = f"{bucket}:{client_ip}"
     now = time.time()
+    if len(_rate_buckets) > MAX_RATE_BUCKET_KEYS:
+        _rate_buckets.clear()
     _rate_buckets[key] = [ts for ts in _rate_buckets[key] if now - ts < window_sec]
     if len(_rate_buckets[key]) >= max_calls:
         raise HTTPException(
@@ -173,6 +190,19 @@ def check_rate_limit(request: Request, bucket: str, max_calls: int, window_sec: 
             detail=f"Rate limit exceeded ({max_calls} requests per {window_sec}s). Please wait and try again.",
         )
     _rate_buckets[key].append(now)
+
+
+def verify_daraja_webhook_token(request: Request):
+    """Validates optional DARAJA_WEBHOOK_SECRET on incoming M-Pesa callbacks."""
+    if not DARAJA_WEBHOOK_SECRET:
+        return
+    provided = (
+        request.query_params.get("token")
+        or request.headers.get("x-daraja-token")
+        or ""
+    ).strip()
+    if not provided or not hmac.compare_digest(DARAJA_WEBHOOK_SECRET, provided):
+        raise HTTPException(status_code=403, detail="Unauthorized Daraja webhook signature")
 
 
 @app.middleware("http")
@@ -780,7 +810,8 @@ def serialize_product(p: Product):
     }
 
 
-def serialize_suborder(sub: SubOrder):
+def serialize_suborder(sub: SubOrder, include_pin: bool = False):
+    raw_pin = getattr(sub, "delivery_pin", "4821") or "4821"
     return {
         "id": sub.id,
         "order_id": sub.order_id,
@@ -799,7 +830,7 @@ def serialize_suborder(sub: SubOrder):
         "fulfillment_status": sub.fulfillment_status,
         "rider_name": sub.rider_name,
         "rider_phone": sub.rider_phone,
-        "delivery_pin": getattr(sub, "delivery_pin", "4821") or "4821",
+        "delivery_pin": raw_pin if include_pin else None,
         "dispute_reason": getattr(sub, "dispute_reason", None),
         "items": json.loads(sub.items_json),
         "escrow_released": sub.escrow_released,
@@ -913,21 +944,26 @@ async def send_otp_verification(
         email_code=email_code,
     )
 
-    return {
+    resp_payload = {
         "success": True,
         "verification_id": otp_record.id,
         "message": f"6-digit verification codes dispatched via SMS to +{req.phone} and Email to {clean_email}.",
         "dispatch_channels": dispatch_info,
-        # Returned in dev/sandbox mode so you can immediately see & test the dispatched SMS & Email codes:
-        "dev_otp_preview": {
+    }
+    if not IS_PRODUCTION:
+        resp_payload["dev_otp_preview"] = {
             "sms_recipient": f"+{req.phone}",
             "sms_otp": sms_code,
-            "sms_gateway": dispatch_info["sms"].get("provider", "Africa's Talking / Safaricom SMS Gateway"),
+            "sms_gateway": dispatch_info["sms"].get(
+                "provider", "Africa's Talking / Safaricom SMS Gateway"
+            ),
             "email_recipient": clean_email,
             "email_otp": email_code,
-            "email_gateway": dispatch_info["email"].get("provider", "BarmaBiz Transactional SMTP / Resend"),
-        },
-    }
+            "email_gateway": dispatch_info["email"].get(
+                "provider", "BarmaBiz Transactional SMTP / Resend"
+            ),
+        }
+    return resp_payload
 
 
 @app.post("/api/auth/verify-otp")
@@ -1403,7 +1439,7 @@ async def create_multivendor_order(
         )
         db.add(sub)
         db.flush()
-        created_suborders.append(serialize_suborder(sub))
+        created_suborders.append(serialize_suborder(sub, include_pin=True))
 
     # Initiate Daraja M-Pesa STK Push (or Sandbox Simulation)
     stk_result = await mpesa_service.initiate_stk_push(
@@ -1484,6 +1520,7 @@ async def mpesa_stk_webhook_callback(request: Request, db: Session = Depends(get
     Authoritative Safaricom Daraja STK Push Callback Webhook.
     Matches CheckoutRequestID, records MpesaReceiptNumber, and marks Order PAID.
     """
+    verify_daraja_webhook_token(request)
     try:
         payload = await request.json()
     except Exception:
@@ -1535,6 +1572,7 @@ async def query_mpesa_stk_status(checkout_request_id: str):
 @app.post("/api/mpesa/b2c-callback")
 async def mpesa_b2c_webhook_callback(request: Request, db: Session = Depends(get_db)):
     """Safaricom Daraja B2C Split Payout Webhook listener."""
+    verify_daraja_webhook_token(request)
     try:
         payload = await request.json()
     except Exception:
@@ -1583,7 +1621,7 @@ def track_order(order_number: str, db: Session = Depends(get_db)):
             "total_amount": order.total_amount,
             "payment_status": order.payment_status,
             "created_at": order.created_at,
-            "suborders": [serialize_suborder(s) for s in order.suborders],
+            "suborders": [serialize_suborder(s, include_pin=True) for s in order.suborders],
         },
     }
 
@@ -1831,6 +1869,24 @@ def vendor_upload_product_image(
             status_code=400, detail="Image file exceeds the 5 MB maximum upload size"
         )
 
+    # Verify binary magic bytes match the declared image MIME type
+    valid_magic = (
+        (mime in ("image/jpeg", "image/jpg") and img_bytes.startswith(b"\xff\xd8\xff"))
+        or (mime == "image/png" and img_bytes.startswith(b"\x89PNG\r\n\x1a\n"))
+        or (mime == "image/gif" and img_bytes.startswith((b"GIF87a", b"GIF89a")))
+        or (
+            mime == "image/webp"
+            and len(img_bytes) >= 12
+            and img_bytes[:4] == b"RIFF"
+            and img_bytes[8:12] == b"WEBP"
+        )
+    )
+    if not valid_magic:
+        raise HTTPException(
+            status_code=400,
+            detail="Uploaded file header does not match a valid JPG, PNG, WEBP, or GIF image.",
+        )
+
     ext = allowed_mimes[mime]
     unique_name = f"store{store_id}_{int(time.time())}_{secrets.token_hex(4)}{ext}"
     file_path = os.path.join(UPLOAD_DIR, unique_name)
@@ -1992,13 +2048,13 @@ def vendor_update_suborder_status(
             detail="Order is already marked DELIVERED and Escrow has already been released.",
         )
 
-    if req.fulfillment_status == "DELIVERED":
+    if req.fulfillment_status == "DELIVERED" and current_user.role != "SUPERADMIN":
         expected_pin = (getattr(sub, "delivery_pin", None) or "4821").strip()
         provided_pin = (req.delivery_pin or "").strip()
-        if provided_pin and not hmac.compare_digest(expected_pin, provided_pin):
+        if not provided_pin or not hmac.compare_digest(expected_pin, provided_pin):
             raise HTTPException(
                 status_code=400,
-                detail="Invalid 4-digit Buyer Delivery Release PIN. Ask the buyer for their Order Receipt PIN to unlock Escrow.",
+                detail="Invalid or missing 4-digit Buyer Delivery Release PIN. Ask the buyer for their Order Receipt PIN to unlock Escrow.",
             )
 
     sub.fulfillment_status = req.fulfillment_status
