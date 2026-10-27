@@ -1,0 +1,32 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.venv/
+venv/
+env/
+
+# SQLite & Runtime Uploads
+*.db
+*.db-journal
+*.sqlite3
+backend/uploads/*
+!backend/uploads/.gitkeep
+
+# Node / Frontend Build
+node_modules/
+frontend/node_modules/
+frontend/dist/
+dist/
+npm-debug.log*
+
+# Environment & Secrets
+.env
+.env.*
+!.env.example
+
+# OS / Editor
+.DS_Store
+.vscode/
+.idea/
